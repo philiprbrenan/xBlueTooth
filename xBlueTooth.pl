@@ -1,4 +1,6 @@
 #!/usr/bin/perl
+my $action        = 1; # 1 - run, 2 - upload results to s3, 3 - zip to S3
+my $processImages = 1; # 1 - use prior results , 2 - cut out images
 =pod
 
 Transform a BlueTooth Word document saved in .fodt format to Dita
@@ -33,11 +35,9 @@ my $outErrors           = $out."errors/";                                       
 my $reportDir           = $out."reports/";                                      # Directory for combined report
 my $zipPath             = "$home/zip";                                          # Work folder for zip files
 
-# Settings
-my $version             = "2017.02.18 19:08:11";                                # Version for reports
-
 # Reports
 my %lintResults;                                                                # Files that passed or failed lint
+my @imageConversionCommands;                                                    # Commands to convert images
 
 sub countTagsByType($$)                                                         # Count the tags by tag type
  {my ($x, $folder) = @_;                                                        # Input specification, output sub folder name to contain results
@@ -135,8 +135,8 @@ sub saveSection($$$)                                                            
    });
 
   my $f = filePath $outDita, $x->file, "$file.dita";
-  XmlWrite::new()->lint($p, $f);
   $p->cut;                                                                      # Remove this section it does not show up inside other sections
+  XmlWrite::new()->lint($p, $f);
  }
 
 my $taskNumber;                                                                 # Give each task a unique number
@@ -278,11 +278,6 @@ sub formatTestSection($$)                                                       
      }
    });
 
-  my $debug = $s->id eq "task191";
-  if ($debug)
-   {say STDERR "AAAA ", $s->string =~ s/></>\n</gsr;
-   }
-
   if (1)                                                                        # Improve tables
    {my $body;
 
@@ -292,19 +287,43 @@ sub formatTestSection($$)                                                       
        {my $g = $o->change(qw(thead))->wrapWith(qw(tgroup));
         $body = $g->create(qw(tbody));
         $g->putLast($body);
-say STDERR "BBBB" if $debug;
        }
-say STDERR "CCCC body=", !!$body, "  ", $o->context if $debug;
-
       if ($body && $o->at(qw(row table)))
        {$body->putLast($o->cut);
        }
      });
    }
 
+  my $debug = $s->id eq "task18";
+  if ($debug)
+   {say STDERR "AAAA ", $s->string =~ s/></>\n</gsr;
+   }
+
+  &unwrapImages($s);
+
   if ($debug)
    {say STDERR "EEEE ", $s->string =~ s/></>\n</gsr;
    }
+ }
+
+sub unwrapImages($;$)                                                           # Unwrap junk surrounding an image in a section
+ {my ($section, $debug) = @_;
+  my %unwrap;
+  $section->by(sub
+   {my ($i, $o) = @_;
+#say STDERR "CCCC ", $i->context if $debug and $i->at(qw(image));
+    if ($i->at(qw(image office:binary-data)))
+     {my ($n, $t) = map {$i->attr($_)} qw(number type);
+      my $href = 'images/'.$n.'.'.$t;
+      $i->setAttr(href=>$href);
+      $i->deleteAttr($_) for qw(number type);
+      for(my $p = $o; $p; $p = $p->parent)
+       {last unless $p->tag =~ /:/;
+        $unwrap{"$p"} = $p;
+       }
+     }
+   });
+  $_->unwrap for values %unwrap;                                                # Unwrap once the traverse has been completed to avoid changing the parse tree while trying to find the elements to unwrap
  }
 
 sub transformTestSection($$)                                                    # Classify a test section
@@ -316,21 +335,22 @@ sub transformTestSection($$)                                                    
    });
   return 0 if $subSections > 1;                                                 # Found a section in the section so it cannot be a test section
 
-  eval
-   {$s->by(sub
-     {my ($p) = @_;
-      if ($p->at(qw(p)))
-       {if (my $a = $p->attr(qw(text:style-name)))
-         {if ($a eq "Test_20_case_20_Verdict")
-           {formatTestSection($x, $s);                                          # Found a test section
-            die "found";
-           }
+  my $foundVerdict;                                                             # Check whether this section is a test description
+  $s->by(sub
+   {my ($p) = @_;
+    if ($p->at(qw(p)))
+     {if (my $a = $p->attr(qw(text:style-name)))
+       {if ($a eq "Test_20_case_20_Verdict")
+         {$foundVerdict++;                                                      # Found a test section
          }
        }
-     });
-   };
-  return 1 if $@ and $@ =~ /\Afound/;
-  $@
+     }
+   });
+  if ($foundVerdict)                                                            # Found a test section
+   {formatTestSection($x, $s);
+    return 1;
+   }
+  0
  }
 
 my $conceptNumber;                                                              # Give each concept a unique number
@@ -343,6 +363,7 @@ sub formatConcept($$)                                                           
   my $title = $section->get(qw(title));
   $section->wrapContentWith(qw(conbody));
   $section->putFirst($title->cut) if $title;
+  &unwrapImages($section);
  }
 
 sub transformSections($)                                                        # Transform each section into a topic of some type
@@ -358,12 +379,11 @@ sub transformSections($)                                                        
  }
 
 my @bookMapFileNames;                                                           # Stack of file names referenced in the bookmap
+
 sub createBookMapEntry($$$$)                                                    # Create a bookmap entry
  {my ($x, $beforeNotAfter, $bookMap, $o) = @_;                                  # Input specification, before or after the tag, bookmap array, title, section
   if (my $n = $o->cutOut)
    {my $t = $o->get(qw(title));
-#    my $n = $o->attr(qw(text:outline-level));
-#    my $s = '  ' x $n;
     my $tag = $n == 1 ? qw(chapter) : qw(topicref);
     if ($beforeNotAfter)
      {my $f = uniqueFileNameForSection($x, $o);
@@ -444,6 +464,8 @@ sub changeObviousTagsLikeP($)                                                   
    });
  }
 
+my $imageNumber;                                                                # Number the image files
+
 sub convertInputFile($)                                                         # Convert an input file
  {my ($inputFile) = @_;                                                         # Input file to convert
   say STDERR "convertInputFile inputFile=", dump($inputFile);
@@ -452,23 +474,57 @@ sub convertInputFile($)                                                         
     confess "File $inputFile does not have an extension of .fodt";
 
   my @inputFile = fileparse($inputFile, qw(fodt));                              # Parse file name
+  my $project   = $inputFile[0] =~ s/\.\Z/\//r;                                 # Project name from file name
 
   my $i = $inputFile =~ s/\.fodt\Z/.data/ri;                                    # Storable version of file
 
   my $x = -e $i ? retrieve($i) : undef;
 
-  if (!$x)
+# For some reason Perl cannot execute office reliably, so write a set of
+# commands to convert the images encountered and run this separately manually
+# from the command line after this script has completed.
+
+  if (!$x or $processImages > 1)                                                # Save image data
    {say STDERR "Start parse and save of $inputFile";
     my $t = time();
 
     my $s = readFile($inputFile);
-    my $S = $s =~ s(<office:binary-data>.*?<\/office:binary-data>)              # Removing the stored images reduces the file size from 250M to 2M, we need to actually save off the cut out sections and insert a reference to them
-                   (<image\/>)gsr;
-    my $l = length($s); my $ll = length($l);
-    my $L = length($S); my $LL = length($L);
-    say STDERR "Squashing binary-data o($ll) to o($LL) = $L";
+    if (1)
+     {say STDERR "Start image location in string of ", length($s);
+      my @p;
+      my $p = 0;
+      my ($s1, $s2) = ('<office:binary-data>', '</office:binary-data>');
+      for(;;)                                                                   # Locate images
+       {my $q = index($s, $s1, $p);  last if $q < 0;
+        my $Q = index($s, $s2, $q);  last if $Q < 0;
+        push @p, [$q+length($s1), $Q-$q-length($s1)];
+        $p = $Q;
+       }
+      say STDERR "Cutting out ", scalar(@p), " images";                         # Cut out images
+      my $imageDir = "$outDita$project/images/";
+      for(reverse @p)
+       {my $n = ++$imageNumber;
+        my ($p, $l) = @$_;
 
-    $x = Data::Edit::Xml::new(inputString=>$S);
+        say STDERR "Cut from $p for $l";
+
+        my $i = substr($s, $p, $l);                                             # Input text
+        my $type = $i =~ m/\A\/9j/ ? 'jpg' : 'svg';                             # Decide image type
+           $i =~ s/ //g;                                                        # Remove leading spaces on each line
+           $i = "begin-base64 664 $n.odg\n$i====";                              # Uudecode to .odg header
+
+        writeFile($imageDir."/$n.uue", $i);                                     # Write uuencoded file
+        push @imageConversionCommands,
+          "cd $imageDir && uudecode < $n.uue";
+        push @imageConversionCommands,
+         "cd $imageDir && unoconv -d graphics --format $type $n.odg";
+        substr($s, $p, $l) = "<image number='$n' type=\"$type\"\/>";
+       }
+      say STDERR "End image cut out";
+      writeFile($reportDir.'convertImages.sh', join("\n", @imageConversionCommands)); # Write the image conversion commands for safe keeping
+     }
+
+    $x = Data::Edit::Xml::new(inputString=>$s);                                 # Parse input xml
 
     changeObviousTagsLikeP($x);                                                 # This takes some time
 
@@ -547,6 +603,20 @@ sub XmlWrite::new
     writeFile($file, $s);                                                       # Save the xml to the specified file
    }
 
+  sub failedConcept($)                                                          # Write a failore notice inorde to get the bookmap to come clean
+   {my ($file) = @_;                                                            # Document, parse tree, output file
+    my $n = ++$conceptNumber;
+    writeFile($file, <<END);
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE concept PUBLIC "-//OASIS//DTD DITA Concept//EN" "concept.dtd">
+<concept xmlns:ditaarch="http://dita.oasis-open.org/architecture/2005/" id="concept$n">
+  <title>Failure</title>
+  <conbody>
+    <p>This represents a file that failed to lint</p>
+  </conbody>
+</concept>
+END
+   }
   sub format($$$;$)                                                             # Pretty print a parse tree
    {my ($xmlDoc, $x, $file, $addStyles) = @_;                                   # Document, parse tree, output file
     my $c = $xmlDoc->catalog;
@@ -567,6 +637,8 @@ sub XmlWrite::new
       if ($s)
        {say STDERR "LLLLLLLLLLLLLLL Format\n$l\n$file\n$s\n" if $s;
         $lintResults{fail}{$file}++;
+        failedConcept($file);
+        return $s;
        }
       else                                                                      # If no formatting errors occurred, then lint
        {my $l = $e." xmllint --valid --format --output \"$file\"  \"$file\"";
@@ -576,28 +648,55 @@ sub XmlWrite::new
           unshift @s, "Generated on: ". dateTimeStamp;
           appendFile($file, join "\n", map {chomp; "<!-- $_ -->"} @s);
           $lintResults{fail}{$file}++;
+          failedConcept($file);
+          return $s;
          }
         else
          {$lintResults{pass}{$file}++;
+          return undef;
          }
        }
      }
    }
  }
 
-# Convert the supplied files after they have been converted to .fodt format by some other means
+# Actions
 
-convertInputFile($_) for fileList($in."*.fodt");                                # Convert the input files
+if ($action == 1)                                                               # Convert the input files
+ {convertInputFile($_) for fileList($in."*.fodt");
 
-if (1)
- {my %pass = %{$lintResults{pass}};
-  my %fail = %{$lintResults{fail}};
+  if (1)                                                                        # Pass fail report
+   {my %pass = %{$lintResults{pass}};
+    my %fail = %{$lintResults{fail}};
 
-  writeFile($reportDir."lintPassFail.data", join "\n",                          # Pass fail report
-   "Pass/fail on: ".dateTimeStamp,
-   '',
-   formatTableBasic([["Pass", scalar keys %pass],
-                     ["Fail", scalar keys %fail]]),
-   '', 'Pass', (sort keys %pass),
-   '', 'Fail', (sort keys %fail));
+    writeFile($reportDir."lintPassFail.data", join "\n",
+     "Pass/fail on: ".dateTimeStamp,
+     '',
+     formatTableBasic([["Pass", scalar keys %pass],
+                       ["Fail", scalar keys %fail]]),
+     '', 'Pass', (sort keys %pass),
+     '', 'Fail', (sort keys %fail));
+   }
+ }
+
+if ($action == 2)                                                               # Sync results to s3
+ {my $c = "aws s3 sync $out s3://btwd/out --delete --size-only --profile fmc";
+  say STDERR $c;
+  print STDERR qx($c);
+ }
+
+if ($action == 3)                                                               # Zip to S3
+ {my $z = "out4.zip";
+  my $Z = "$out../";
+  if (1)
+   {unlink($z);
+    my $c = "cd $Z && zip -r $z out -x \*.uee -x \*.odg";
+    say STDERR $c;
+    print STDERR qx($c);
+   }
+  if (1)
+   {my $c = "aws s3 cp $Z$z  s3://btwd/$z --profile fmc";
+    say STDERR $c;
+     print STDERR qx($c);
+   }
  }
