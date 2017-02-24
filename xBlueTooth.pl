@@ -1,4 +1,4 @@
-#!/usr/bin/perl -I/home/phil/z/perl/cpan/DataTableText/
+#!/usr/bin/perl
 =pod
 
 Transform a BlueTooth Word document saved in .fodt format to Dita
@@ -158,7 +158,7 @@ sub formatTestSection($$)                                                       
        {if ($text =~ /\A(Test\s+Purpose|Test Procedure|Reference|Initial\s+Condition|Expected\s+Outcome|Pass\s+Verdict)\Z/)
          {$p->change(qw(title));
           my $q = $p->wrapWith(qw(section));
-          $q->transformed  = 1;                                                 # Show that this is a generated section and so doe snot need to be further transformed
+          $q->transformed  = 1;                                                 # Show that this is a generated section and so does not need to be further transformed
           $testProcedure   = $q if $text =~ /procedure/i;                       # Special sections
           $expectedOutcome = $q if $text =~ /expected/i;
           $passVerdict     = $q if $text =~ /verdict/i;
@@ -188,6 +188,7 @@ sub formatTestSection($$)                                                       
 
   if ($testProcedure)                                                           # Format the test procedure section as steps
    {my $numberOfLists;
+
     $testProcedure->by(sub
      {my ($o) = @_;
       if    ($o->at(qw(p text:list-item text:list))) {$o->change(qw(cmd))}
@@ -195,9 +196,6 @@ sub formatTestSection($$)                                                       
       elsif ($o->at(qw(                 text:list))) {$o->change(qw(steps)); ++$numberOfLists}
      });
 
-#    if ($s->id eq "task188")
-#     {say STDERR "AAAAAAAA numberOfLists=", dump($numberOfLists), "\n", $s->string =~ s/></>\n</gsr;
-#     }
     if (!$numberOfLists)                                                        # Perhaps they formatted the procedure as a series if paragraphs
      {my $s = $testProcedure->wrapContentWith(qw(steps));
       my $p = $s->c(qw(p));
@@ -205,31 +203,43 @@ sub formatTestSection($$)                                                       
       $_->change(qw(cmd))->wrapWith(qw(step)) for @$p;                          # The preceding paragraphs become commands
       $s->putNext($q->cut) if $q;                                               # The last paragraph becomes an example
       my $t = $s->get(qw(title));                                               # Remove the title before the steps
-#     $s->putBefore($t->change(qw(p))->cut);
-      $t->cut;
+      $t->cut if $t;
       $q->wrapWith(qw(example));
      }
-#    if ($s->id eq "task188")
-#     {say STDERR "BBBBBBBB numberOfLists=", dump($numberOfLists), "\n", $s->string =~ s/></>\n</gsr;
-#      exit;
-#     }
 
-    $testProcedure->by(sub                                                      # Wrap paragraphs after steps with example
-     {my ($o) = @_;
-      if ($o->at(qw(p section)))
-       {$o->wrapWith(qw(example));
-       }
-     });
+    else
+     {$testProcedure->by(sub                                                    # Wrap paragraphs after steps with example
+       {my ($o) = @_;
+        if ($o->at(qw(p section)))
+         {my $q = $o->wrapWith(qw(example));
+         }
+       });
+      $testProcedure->byReverse(sub                                             # Convert examples that occurred before the steps into step/cmd
+       {my ($o) = @_;
+        if ($o->at(qw(example)))
+         {if (my $n = $o->next)
+           {if ($n->at(qw(steps)))
+             {$n->putFirst($o->change(qw(step))->cut);
+             }
+           }
+         }
+       });
+      $testProcedure->by(sub                                                    # Change p to cmd inside what was an example
+       {my ($o) = @_;
+        $o->change(qw(cmd)) if $o->at(qw(p step));
+       });
+     }
+
     $testProcedure->by(sub                                                      # Remove surrounding section
      {my ($o, $p) = @_;
       if ($o->at(qw(steps section)))
        {my $t = $p->get(qw(title));
-#       $t->change(qw(p));
-        $t->cut;                                                                # Remove title of removed section
+        $t->cut if $t;                                                          # Remove title of removed section
         $p->unwrap;
        }
      });
    }
+
   if ($expectedOutcome and $passVerdict)                                        # Create post req by merging these sections
    {$expectedOutcome->change(qw(postreq));
     $expectedOutcome->putLast($passVerdict->cut);
@@ -241,6 +251,59 @@ sub formatTestSection($$)                                                       
         $o->wrapWith(qw(p))
        }
      });
+   }
+
+  $s->by(sub                                                                    # Change example-section to example-post-req and remove title of section
+   {my ($o, $p) = @_;
+    if ($o->at(qw(section)))
+     {if (!$o->next)
+       {if (my $p = $o->prev)
+         {if ($p->at(qw(example)))
+           {$o->change(qw(postreq));
+            if (my $t = $o->get(qw(title)))                                     # Remove title
+             {$t->cut;
+             }
+           }
+         }
+       }
+     }
+   });
+
+  $s->by(sub                                                                    # Remove empty steps - we should investigate why they are empty
+   {my ($o) = @_;
+    if ($o->at(qw(steps)))
+     {if (!$o->contents)
+       {$o->cut;
+       }
+     }
+   });
+
+  my $debug = $s->id eq "task191";
+  if ($debug)
+   {say STDERR "AAAA ", $s->string =~ s/></>\n</gsr;
+   }
+
+  if (1)                                                                        # Improve tables
+   {my $body;
+
+    $s->by(sub                                                                  # Change table:table-header-rows to tgroup-thead
+     {my ($o) = @_;
+      if ($o->at(qw(table:table-header-rows)))
+       {my $g = $o->change(qw(thead))->wrapWith(qw(tgroup));
+        $body = $g->create(qw(tbody));
+        $g->putLast($body);
+say STDERR "BBBB" if $debug;
+       }
+say STDERR "CCCC body=", !!$body, "  ", $o->context if $debug;
+
+      if ($body && $o->at(qw(row table)))
+       {$body->putLast($o->cut);
+       }
+     });
+   }
+
+  if ($debug)
+   {say STDERR "EEEE ", $s->string =~ s/></>\n</gsr;
    }
  }
 
@@ -294,19 +357,22 @@ sub transformSections($)                                                        
    });
  }
 
+my @bookMapFileNames;                                                           # Stack of file names referenced in the bookmap
 sub createBookMapEntry($$$$)                                                    # Create a bookmap entry
  {my ($x, $beforeNotAfter, $bookMap, $o) = @_;                                  # Input specification, before or after the tag, bookmap array, title, section
   if (my $n = $o->cutOut)
    {my $t = $o->get(qw(title));
 #    my $n = $o->attr(qw(text:outline-level));
 #    my $s = '  ' x $n;
-    my $f = uniqueFileNameForSection($x, $o);
     my $tag = $n == 1 ? qw(chapter) : qw(topicref);
     if ($beforeNotAfter)
-     {push @$bookMap, "<$tag href=\"$f.dita\">";
+     {my $f = uniqueFileNameForSection($x, $o);
+      push @$bookMap, "<$tag href=\"$f.dita\">";
+      push @bookMapFileNames, $f;                                               # Stack of file names referenced in the bookmap
      }
     else
      {push @$bookMap, "</$tag>";
+      my $f = pop @bookMapFileNames;
       saveSection($x, $o, $f);
      }
    }
@@ -333,7 +399,7 @@ sub createBookMap($)                                                            
        }
      });
 
-    my $f = filePath $outDita, $x->file, "bm.dita";
+    my $f = filePath $outDita, $x->file, "bm.ditamap";
     XmlWrite::new()->lint($b, $f);
    }
  }
@@ -448,7 +514,7 @@ sub XmlWrite::new
       qw(text:span  text:bookmark-ref text:bookmark-start text:bookmark-end),   # From task
       qw(draw:frame draw:object-ole draw:image text:soft-page-break),
       qw(field:fieldmark-start field:fieldmark-end  text:sequence),             # From concept
-      qw(text:bookmark text:line-break text:s),
+      qw(text:bookmark text:line-break text:s text:tab),
       qw(table:table-column table:covered-table-cell);
       $x->by(sub
        {my ($o) = @_;
